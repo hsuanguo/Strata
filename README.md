@@ -122,6 +122,62 @@ the same way - nothing big is downloaded again.
 
 **Linux:** run `./setup.sh` - same questions, same result.
 
+### Docker (Linux)
+
+Requires an NVIDIA GPU supported above, driver 580 or newer, and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) configured for Docker. The default IQ2_XS model needs about 48 GB of host RAM and at least 80 GB of free space for model data. The first launch needs internet access to download and prepare the model; the image itself contains no model weights.
+
+The launcher runs `setup.py` inside the container on the first launch, persists its artifacts to a Docker volume, and starts the server. On later launches it skips setup and serves from the cached model, engine and configuration.
+
+```sh
+docker build -t strata:local .
+docker run --rm --gpus all -p 127.0.0.1:8080:8080 \
+  -v strata-data:/data -e STRATA_API_KEY=replace-with-a-secret strata:local
+```
+
+That's all you usually need: the model, context size, KV cache, vision and GPU defaults are baked into the launcher (see the table below). Only `STRATA_API_KEY` is normally set on the command line; the rest are only needed when you want to change a default or pin a non-zero GPU. Without `STRATA_API_KEY` the API is open - useful for local-only use, risky once you publish the port.
+
+Wait for setup and model loading to finish, then open `http://127.0.0.1:8080` or check `http://127.0.0.1:8080/health`. OpenAI-compatible clients use `http://127.0.0.1:8080/v1` with the key set in `STRATA_API_KEY`. Stop with Ctrl+C; running the same command again with `strata-data:/data` reuses the model, engine and configuration. Keep this volume when replacing the container. To expose the API to other machines, change the port mapping to `-p 8080:8080` and set a strong API key.
+
+#### Picking the model, context, vision, KV cache, GPU, and API port
+
+The launcher reads its choices from environment variables on each start. Set them with `-e` on `docker run` (or in a Compose file). The defaults match `setup.sh`'s recommended choice.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `STRATA_FAMILY` | `qwen` | `qwen`, `swift`, or `coder` (see "Which model should I pick?") |
+| `STRATA_MODEL` | `IQ2_XS` | `Q2_0`, `IQ2_XS`, `IQ3_XXS`, `IQ3_S` (qwen only), or `IQ1_M` (coder only) |
+| `STRATA_CONTEXT` | *(auto)* | `8192`, `32768`, `65536`, `131072`, or `262144` tokens |
+| `STRATA_VISION` | `no` | `no`, `gpu`, or `cpu` for image support |
+| `STRATA_KV` | *(auto: int8 above 8K, fp16 at or below)* | `int8` or `q4_0` |
+| `STRATA_GPU` | `0` | nvidia-smi number, or `"0,2"` for a layer split |
+| `STRATA_HOST` | `0.0.0.0` | server bind address |
+| `STRATA_PORT` | `8080` | server listen port |
+| `STRATA_API_KEY` | *(empty, open)* | required token for `/v1/*` |
+
+The variables `STRATA_FAMILY`, `STRATA_MODEL`, `STRATA_CONTEXT`, `STRATA_VISION`, and `STRATA_KV` are only read on the **first** run, when there is no cached config yet, or when you ask for a reconfigure (see below). `STRATA_GPU`, `STRATA_HOST`, and `STRATA_PORT` are applied every run.
+
+#### Changing choices later (re-running setup inside Docker)
+
+The launcher runs `setup.py --yes` non‑interactively inside the container, so every choice must be expressed on the `docker run` command line. To change any of them on a later launch:
+
+- Set the `STRATA_*` env vars you want to change, and add `-e STRATA_RECONFIGURE=1`. The launcher will re‑run `setup.py` with those values, reusing any model files already present in the volume and only downloading what's missing.
+
+  ```sh
+  docker run --rm --gpus all -p 8080:8080 \
+    -v strata-data:/data \
+    -e STRATA_API_KEY=replace-with-a-secret \
+    -e STRATA_FAMILY=coder -e STRATA_MODEL=IQ1_M \
+    -e STRATA_CONTEXT=32768 -e STRATA_VISION=gpu \
+    -e STRATA_RECONFIGURE=1 \
+    strata:local
+  ```
+
+Anything you don't set keeps its current default, and the cached config and engine are reused.
+
+> The image uses CUDA 13.0 on Ubuntu 24.04 with build tools so it can compile the engine inside Docker if a compatible prebuilt is unavailable. That makes the image large and a fallback first setup can take longer. The default Docker path runs the original IQ2_XS model without image support on port 8080.
+> 
+> If you ask for `STRATA_VISION=gpu|cpu` but the cached engine was built without the image encoder (the default prebuilt), the launcher warns and falls back to `STRATA_VISION=no`. To enable images, build with vision support.
+
 ## Using it
 
 <p align="center"><img src="docs/media/runpagoda.png" width="900" alt="The Strata app's Monitor tab next to a coding agent"><br>
